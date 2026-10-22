@@ -56,6 +56,7 @@
     },
     days: {},        // { '2026-03-01': { p: n, s: n, w: n } }
     words: {},       // { word: { s: 0..5, due: 'YYYY-MM-DD', seen, ok } }
+    zk: {},          // 中考单元词：{ 'family': { s, due, seen, right, wrong } }
     phonics: {},     // { '/iː/': 1..3 }
     speak: {},       // { topicId: { best, tries } }
     cet4: {          // { id: true }
@@ -370,6 +371,12 @@
   let speakingTopic = null;
   let phonicsOpen = null;
   let wordsLevel = 'all';
+  let zkMode = 'level';      // 'level' = 分级词表 / 'unit' = 中考单元
+  let zkUnit = null;         // 当前单元 id
+  let zkQueue = [];
+  let zkIndex = 0;
+  let zkQuestion = null;     // { idx, mode, word, options, answerIndex, answered, ok }
+  let zkStat = { right: 0, wrong: 0 };
   let cet4Tab = 'listening';
   let reviewQueue = [];
   let reviewIndex = 0;
@@ -441,7 +448,12 @@
       const n = Object.keys(state.speak).length;
       html = `<div><div class="count">${n}<span style="font-size:.5em;color:var(--ink-mute)">/18</span></div><div class="count-label">练过的话题</div></div>`;
     } else if (currentView === 'words') {
-      html = `<div><div class="count">${dueWords(wordsLevel).length}</div><div class="count-label">待复习</div></div>`;
+      if (zkMode === 'unit') {
+        const total = zkAllWords().length;
+        html = `<div><div class="count">${zkLearnedCount()}<span style="font-size:.5em;color:var(--ink-mute)">/${total}</span></div><div class="count-label">中考词已学</div></div>`;
+      } else {
+        html = `<div><div class="count">${dueWords(wordsLevel).length}</div><div class="count-label">待复习</div></div>`;
+      }
     } else if (currentView === 'cet4') {
       const total = Object.values(state.cet4).reduce((a, o) => a + Object.keys(o).length, 0);
       html = `<div><div class="count">${total}</div><div class="count-label">已完成题组</div></div>`;
@@ -798,6 +810,22 @@
   }
 
   function renderWords() {
+    /* 先同步模式切换控件 */
+    $$('#word-mode-seg button').forEach((b) => {
+      b.setAttribute('aria-pressed', String(b.dataset.mode === zkMode));
+    });
+    const isUnit = zkMode === 'unit';
+    $('#word-level-row').hidden = isUnit;
+    $('#words-all-block').hidden = isUnit;
+
+    if (isUnit) {
+      $('#words-h2').textContent = zkUnit ? '单元复习' : '中考词汇';
+      renderZhongkao();
+      return;
+    }
+
+    $('#words-h2').textContent = '复习';
+
     const level = wordsLevel === 'all' ? null : wordsLevel;
     reviewQueue = buildQueue(wordsLevel);
     reviewIndex = 0;
@@ -825,6 +853,262 @@
     $$('#word-level-seg button').forEach((b) => {
       b.setAttribute('aria-pressed', String(b.dataset.lv === wordsLevel));
     });
+  }
+
+  /* ============================================================
+     中考词汇：按单元 + 两种题型随机
+     ============================================================ */
+  const normEn = (s) => String(s == null ? '' : s)
+    .toLowerCase()
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[^a-z0-9'\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  function zkAllWords() {
+    return ZHONGKAO.reduce((a, u) => a.concat(u.words), []);
+  }
+  function zkLearnedCount() {
+    return zkAllWords().filter((w) => ((state.zk[w.e] || {}).s || 0) > 0).length;
+  }
+
+  function buildZkQueue(unit) {
+    const today = todayKey();
+    zkQueue = unit.words.map((w) => {
+      const st = state.zk[w.e] || { s: 0, due: today };
+      return { w, st };
+    }).sort((a, b) => {
+      const rank = (x) => ((x.st.s || 0) === 0 ? 0 : (x.st.due <= today ? 1 : 2));
+      const ra = rank(a), rb = rank(b);
+      if (ra !== rb) return ra - rb;
+      return (a.st.s || 0) - (b.st.s || 0);
+    });
+    zkIndex = 0;
+    zkQuestion = null;
+    zkStat = { right: 0, wrong: 0 };
+  }
+
+  /* 出一题：一半给中文写英文，一半给英文选中文 */
+  function makeZkQuestion(word, unit, idx) {
+    const mode = Math.random() < 0.5 ? 'cn2en' : 'en2cn';
+    const q = { idx, mode, word, answered: false, ok: null };
+
+    if (mode === 'en2cn') {
+      const seenCn = new Set([word.c]);
+      const others = [];
+      for (const cand of unit.words.slice().sort(() => Math.random() - 0.5)) {
+        if (cand.e === word.e || seenCn.has(cand.c)) continue;
+        seenCn.add(cand.c);
+        others.push(cand);
+        if (others.length === 3) break;
+      }
+      const opts = [word].concat(others).map((x) => ({ e: x.e, c: x.c }));
+      for (let i = opts.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [opts[i], opts[j]] = [opts[j], opts[i]];
+      }
+      q.options = opts;
+      q.answerIndex = opts.findIndex((x) => x.e === word.e);
+    }
+    return q;
+  }
+
+  function renderZhongkao() {
+    const host = $('#words-review');
+
+    /* 单元列表：按 U1–U5 分组 */
+    if (!zkUnit) {
+      const total = zkAllWords().length;
+      const groups = {};
+      ZHONGKAO.forEach((u) => {
+        const g = String(u.unit).split('-')[0];
+        (groups[g] = groups[g] || []).push(u);
+      });
+
+      const groupHtml = Object.keys(groups).map((g) => {
+        const cards = groups[g].map((u) => {
+          const learned = u.words.filter((w) => ((state.zk[w.e] || {}).s || 0) > 0).length;
+          const pct = Math.round((learned / u.words.length) * 100);
+          return `<button class="topic-card" data-act="zk-open" data-id="${u.id}">
+            <span class="zk-eps">${esc(u.eps)}</span>
+            <span class="name">${esc(u.unit)} · ${esc(u.title)}</span>
+            <span class="scene">${esc(u.desc)}</span>
+            <span class="meta"><span>${u.words.length} 词</span><span>已学 ${learned} · ${pct}%</span></span>
+          </button>`;
+        }).join('');
+        return `<div class="zk-group-title">${esc(g)}</div>
+          <div class="topic-grid">${cards}</div>`;
+      }).join('');
+
+      host.innerHTML = `
+        <p style="color:var(--ink-soft);max-width:68ch;line-height:1.8">
+          按她课程的 <strong>5 个 Unit、20 个 Lesson</strong> 分好，共 ${total} 个词，顺序和视频一致。
+          每题随机是 <strong>给中文写英文</strong> 或 <strong>给英文选中文</strong>；答错会自动排到下一轮前面。
+          <br><span style="color:var(--ink-mute);font-size:var(--step--1)">
+          标「视频重点词」的是官方分集目录里点名的词；其余是按同课话题补的中考高频词。</span>
+        </p>
+        ${groupHtml}`;
+      return;
+    }
+
+    const unit = ZHONGKAO.find((x) => x.id === zkUnit);
+    if (!unit) { zkUnit = null; renderZhongkao(); return; }
+    if (!zkQueue.length) buildZkQueue(unit);
+    renderZkCard(unit);
+  }
+
+  function renderZkCard(unit) {
+    const host = $('#words-review');
+
+    /* 一轮做完 */
+    if (zkIndex >= zkQueue.length) {
+      const total = zkStat.right + zkStat.wrong;
+      const rate = total ? Math.round((zkStat.right / total) * 100) : 0;
+      host.innerHTML = `
+        <div class="card-review">
+          <div class="zk-meta">${esc(unit.unit)} · ${esc(unit.title)}</div>
+          <div class="zk-done-num">${rate}<span style="font-size:.45em;color:var(--ink-mute)">%</span></div>
+          <div class="zk-done-label">这一轮正确率 · 对 ${zkStat.right} / 错 ${zkStat.wrong}</div>
+          <div class="review-actions">
+            <button class="btn btn-primary" data-act="zk-restart">再过一轮</button>
+            <button class="btn btn-ghost" data-act="zk-back">换一个单元</button>
+          </div>
+        </div>`;
+      return;
+    }
+
+    if (!zkQuestion || zkQuestion.idx !== zkIndex) {
+      zkQuestion = makeZkQuestion(zkQueue[zkIndex].w, unit, zkIndex);
+    }
+    const q = zkQuestion;
+    const w = q.word;
+
+    const head = `<div class="zk-meta">${zkIndex + 1} / ${zkQueue.length} · ${esc(unit.unit)} · ${q.mode === 'cn2en' ? '给中文写英文' : '给英文选中文'}</div>`;
+
+    if (q.mode === 'cn2en') {
+      host.innerHTML = `
+        <div class="card-review">
+          ${head}
+          <div class="zk-prompt-cn">${esc(w.c)}</div>
+          <div class="zk-pos">${esc(w.p)}${w.v ? ' <span class="zk-vtag">视频重点词</span>' : ''}</div>
+          ${q.answered ? '' : `
+            <input class="zk-input" id="zk-input" autocomplete="off" autocapitalize="off"
+                   autocorrect="off" spellcheck="false" placeholder="在这里写英文" aria-label="输入英文答案">
+            <div class="review-actions">
+              <button class="btn btn-primary" data-act="zk-submit">提交</button>
+              <button class="btn btn-ghost" data-act="zk-skip">不会，直接看答案</button>
+            </div>`}
+          <div id="zk-feedback"></div>
+        </div>`;
+      if (!q.answered) {
+        const inp = $('#zk-input');
+        if (inp) inp.focus();
+      }
+    } else {
+      host.innerHTML = `
+        <div class="card-review">
+          ${head}
+          <div class="word">${esc(w.e)}</div>
+          <div class="ipa">${esc(w.i)} <span style="color:var(--line-strong)">|</span> ${esc(w.p)}</div>
+          ${w.v ? '<div style="margin-top:10px"><span class="zk-vtag">视频重点词</span></div>' : ''}
+          <div style="display:flex;justify-content:center;margin-top:14px">
+            <button class="icon-btn" data-act="say" data-text="${esc(w.e)}" data-rate="0.8" aria-label="朗读">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+            </button>
+          </div>
+          <div class="options" style="margin:18px auto 0;text-align:left">
+            ${q.options.map((o, oi) => `
+              <button class="opt" data-act="zk-choose" data-oi="${oi}" ${q.answered ? 'disabled' : ''}>
+                <span class="letter">${'ABCD'[oi]}</span>
+                <span class="text">${esc(o.c)}</span>
+              </button>`).join('')}
+          </div>
+          <div id="zk-feedback"></div>
+        </div>`;
+    }
+
+    if (q.answered) paintZkFeedback(w, q);
+  }
+
+  function paintZkFeedback(w, q) {
+    const fb = $('#zk-feedback');
+    if (!fb) return;
+
+    if (q.mode === 'en2cn') {
+      $$('#words-review .opt').forEach((b, i) => {
+        b.disabled = true;
+        if (i === q.answerIndex) b.classList.add('is-correct');
+        else if (i === q.answerChosen && !q.ok) b.classList.add('is-wrong');
+      });
+    }
+
+    const correctLine = `
+      <div class="zk-answer">
+        <span class="zk-answer-en">${esc(w.e)}</span>
+        <span class="zk-answer-ipa">${esc(w.i)}</span>
+        <span class="zk-answer-cn">${esc(w.c)}</span>
+        <button class="icon-btn" data-act="say" data-text="${esc(w.e)}" data-rate="0.8" aria-label="朗读正确答案" style="width:32px;height:32px">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+        </button>
+      </div>`;
+
+    fb.innerHTML = `
+      <div class="verdict ${q.ok ? 'ok' : 'no'}">
+        <strong>${q.ok ? '对了。' : (q.skipped ? '没关系，看一遍再记。' : '没对。')}</strong>
+        ${q.mode === 'cn2en' && !q.ok && q.typed ? `你写的是 <b>${esc(q.typed)}</b>。` : ''}
+      </div>
+      ${correctLine}
+      <div class="review-actions">
+        <button class="btn btn-primary" data-act="zk-next">${zkIndex + 1 >= zkQueue.length ? '完成本轮' : '下一题'}</button>
+      </div>`;
+  }
+
+  function zkFinish(ok, typed, skipped) {
+    if (!zkQuestion || zkQuestion.answered) return;
+    const q = zkQuestion;
+    const w = q.word;
+    q.answered = true;
+    q.ok = !!ok;
+    q.typed = typed || '';
+    q.skipped = !!skipped;
+
+    /* 记 SRS：答对才升级，答错归零（这样"已学"= 至少答对过一次，不会虚高） */
+    const cur = state.zk[w.e] || { s: 0, seen: 0, right: 0, wrong: 0 };
+    const gaps = [1, 1, 2, 4, 8, 16];
+    const s = ok ? Math.min(5, (cur.s || 0) + 1) : 0;
+    state.zk[w.e] = {
+      s,
+      due: addDays(todayKey(), gaps[s] || 16),
+      seen: (cur.seen || 0) + 1,
+      right: (cur.right || 0) + (ok ? 1 : 0),
+      wrong: (cur.wrong || 0) + (ok ? 0 : 1)
+    };
+
+    if (ok) zkStat.right++; else zkStat.wrong++;
+
+    /* 计入今日"词汇"任务 */
+    const rec = dayRecord();
+    rec.w = (rec.w || 0) + 1;
+
+    save();
+    renderMasthead();
+    renderZkCard(ZHONGKAO.find((x) => x.id === zkUnit));
+  }
+
+  function zkSubmit() {
+    if (!zkQuestion || zkQuestion.answered) return;
+    const input = $('#zk-input');
+    if (!input) return;
+    const typed = input.value;
+    const ok = normEn(typed) === normEn(zkQuestion.word.e);
+    zkFinish(ok, typed, false);
+  }
+
+  function zkChoose(oi) {
+    if (!zkQuestion || zkQuestion.answered) return;
+    const idx = Number(oi);
+    zkQuestion.answerChosen = idx;
+    zkFinish(idx === zkQuestion.answerIndex, '', false);
   }
 
   function renderReviewCard() {
@@ -1388,6 +1672,38 @@
       if (act === 'rate') { rateWord(btn.dataset.rate); return; }
       if (act === 'reset-queue') { reviewQueue = buildQueue(wordsLevel); reviewIndex = 0; reviewFlipped = false; renderReviewCard(); return; }
 
+      /* 中考单元 */
+      if (act === 'zk-mode') {
+        zkMode = btn.dataset.mode === 'unit' ? 'unit' : 'level';
+        zkUnit = null; zkQuestion = null; zkQueue = []; zkIndex = 0;
+        renderWords(); renderMasthead(); return;
+      }
+      if (act === 'zk-open') {
+        zkUnit = btn.dataset.id;
+        zkQuestion = null;
+        const u = ZHONGKAO.find((x) => x.id === zkUnit);
+        if (u) buildZkQueue(u);
+        renderWords(); return;
+      }
+      if (act === 'zk-back') {
+        zkUnit = null; zkQuestion = null; zkQueue = [];
+        renderWords(); return;
+      }
+      if (act === 'zk-restart') {
+        const u = ZHONGKAO.find((x) => x.id === zkUnit);
+        if (u) { buildZkQueue(u); renderZkCard(u); }
+        return;
+      }
+      if (act === 'zk-submit') { zkSubmit(); return; }
+      if (act === 'zk-skip') { zkFinish(false, '', true); return; }
+      if (act === 'zk-choose') { zkChoose(btn.dataset.oi); return; }
+      if (act === 'zk-next') {
+        zkIndex++;
+        zkQuestion = null;
+        renderZkCard(ZHONGKAO.find((x) => x.id === zkUnit));
+        return;
+      }
+
       if (act === 'pick') { pickListening(btn.dataset.listen, btn.dataset.oi); return; }
       if (act === 'pick-read') { pickReading(btn.dataset.p, btn.dataset.q, btn.dataset.oi); return; }
 
@@ -1419,6 +1735,11 @@
       if (ev.target.id === 'sheet') closeSheet();
     });
     document.addEventListener('keydown', (ev) => {
+      if (ev.target && ev.target.id === 'zk-input' && ev.key === 'Enter') {
+        ev.preventDefault();
+        zkSubmit();
+        return;
+      }
       if (ev.key === 'Escape' && !$('#sheet').hidden) closeSheet();
       if (ev.key === 'Escape') TTS.stop();
     });
