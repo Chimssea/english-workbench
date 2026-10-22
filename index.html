@@ -130,7 +130,14 @@
     <!-- ---------- 04 词汇 ---------- -->
     <section class="view" id="view-words" role="tabpanel" hidden>
       <div class="section-head" style="margin-bottom:12px">
-        <h2>复习</h2>
+        <h2 id="words-h2">复习</h2>
+        <div class="seg" id="word-mode-seg" role="group" aria-label="选择词库">
+          <button data-act="zk-mode" data-mode="level" aria-pressed="true">分级词表</button>
+          <button data-act="zk-mode" data-mode="unit" aria-pressed="false">中考单元</button>
+        </div>
+      </div>
+
+      <div id="word-level-row" style="margin-bottom:14px">
         <div class="seg" id="word-level-seg" role="group" aria-label="选择词表级别">
           <button data-lv="all" aria-pressed="true">全部</button>
           <button data-lv="A1" aria-pressed="false">A1</button>
@@ -138,13 +145,16 @@
           <button data-lv="B1" aria-pressed="false">B1</button>
         </div>
       </div>
+
       <div id="words-review"></div>
 
-      <div class="section-head">
-        <h2>全部词</h2>
-        <span class="hint" id="words-count"></span>
+      <div id="words-all-block">
+        <div class="section-head">
+          <h2>全部词</h2>
+          <span class="hint" id="words-count"></span>
+        </div>
+        <div class="word-list" id="words-list"></div>
       </div>
-      <div class="word-list" id="words-list"></div>
     </section>
 
     <!-- ---------- 05 四级 ---------- -->
@@ -214,6 +224,7 @@
 <script src="data-words.js"></script>
 <script src="data-speaking.js"></script>
 <script src="data-cet4.js"></script>
+<script src="data-zhongkao.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
